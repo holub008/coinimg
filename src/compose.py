@@ -42,7 +42,8 @@ def concatenate(
     Each photo is assumed to be one coin on a flat white background. The coin
     is located by its closed, roughly circular outline, then a square crop
     is taken around its center using the maximum radius (so chips and oblong
-    flans still fit).
+    flans still fit). The original background and natural rim shadows are
+    preserved within each crop.
     Both crops are scaled to the same pixel size so the two faces match, then
     joined 50/50 horizontally.
 

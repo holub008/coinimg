@@ -21,7 +21,8 @@ def main(in_dir: str, out_dir: str) -> None:
         reverse_path = os.path.join(in_dir, ordered_files[file_ix + 1])
 
         out_file = concatenate(obverse_path, reverse_path, rotate=270)
-        out_path = os.path.join(out_dir, f'{ordered_files[file_ix]}_combined.jpg')
+        out_name_part = ordered_files[file_ix].split('.')[0]
+        out_path = os.path.join(out_dir, f'{out_name_part}_combined.jpg')
         out_file.save(out_path)
 
 
