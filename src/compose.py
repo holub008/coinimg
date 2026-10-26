@@ -23,11 +23,10 @@ _CW_TRANSPOSE: dict[int, Image.Transpose | None] = {
     270: Image.Transpose.ROTATE_90,
 }
 
-# The coin is the darkest object; this percentile of the full frame locates it
-# even when the paper has a lighting gradient or shadow.
-_CORE_PERCENTILE = 1.5
-_DETECT_MAX_SIDE = 384
-_LOCAL_DARKNESS = 0.85
+# Detect at a fixed resolution so edge thresholds and gap closing behave
+# consistently across phone photos, without processing full-resolution arrays.
+_DETECT_MAX_SIDE = 512
+_EDGE_THRESHOLDS = (2.0, 4.0, 8.0, 16.0)
 
 
 def concatenate(
@@ -41,8 +40,9 @@ def concatenate(
     """Place the obverse on the left and reverse on the right, equally sized.
 
     Each photo is assumed to be one coin on a flat white background. The coin
-    is located as the darkest region, then a square crop is taken around its
-    center using the maximum radius (so chips and oblong flans still fit).
+    is located by its closed, roughly circular outline, then a square crop
+    is taken around its center using the maximum radius (so chips and oblong
+    flans still fit).
     Both crops are scaled to the same pixel size so the two faces match, then
     joined 50/50 horizontally.
 
@@ -111,71 +111,68 @@ def _coin_square(image: Image.Image, *, margin: float) -> Image.Image:
 
 
 def _detect_coin(image: Image.Image) -> tuple[float, float, float]:
-    """Return (cx, cy, radius) of the coin in the original image."""
-    gray = image.convert("L").filter(ImageFilter.GaussianBlur(radius=1))
-    full = np.asarray(gray, dtype=np.float32)
-    scale = max(full.shape) / _DETECT_MAX_SIDE
-    if scale > 1:
-        small_img = gray.resize(
-            (max(int(image.width / scale), 1), max(int(image.height / scale), 1)),
-            Image.Resampling.BILINEAR,
+    """Return (cx, cy, enclosing radius) in original-image coordinates.
+
+    Look for enclosed, compact shapes at several edge strengths. RGB gradients
+    respond to either contrast polarity and to colored coins with similar
+    luminance to the paper. Broad lighting gradients do not form closed rims;
+    frame-touching shadows and elongated objects are rejected by shape.
+    """
+    small = image.convert("RGB")
+    small.thumbnail((_DETECT_MAX_SIDE, _DETECT_MAX_SIDE), Image.Resampling.LANCZOS)
+    if min(small.size) < 3:
+        raise ValueError("could not find a coin: image is too small")
+    rgb = np.asarray(small.filter(ImageFilter.GaussianBlur(0.8)), dtype=np.float32)
+    dy, dx = np.gradient(rgb, axis=(0, 1))
+    strength = np.max(np.hypot(dx, dy), axis=2)
+
+    best: tuple[float, float, float] | None = None
+    best_score = 0.0
+    for threshold in _EDGE_THRESHOLDS:
+        # Bridge small rim gaps, fill enclosed interiors (including bright
+        # highlights), then undo the dilation to retain the flan's dimensions.
+        edges = Image.fromarray((strength > threshold).astype(np.uint8) * 255)
+        thick = np.asarray(edges.filter(ImageFilter.MaxFilter(3))) > 0
+        labels, _ = _label(~thick)
+        border = np.unique(
+            np.concatenate((labels[0], labels[-1], labels[:, 0], labels[:, -1]))
         )
-        small = np.asarray(small_img, dtype=np.float32)
-    else:
-        scale = 1.0
-        small = full
+        enclosed = thick | ~np.isin(labels, border)
+        filled = Image.fromarray(enclosed.astype(np.uint8) * 255)
+        mask = np.asarray(filled.filter(ImageFilter.MinFilter(3))) > 0
+        labels, counts = _label(mask)
 
-    core = small <= np.percentile(small, _CORE_PERCENTILE)
-    if not np.any(core):
-        raise ValueError("could not find a coin: image has no dark pixels")
-    core = _largest_component(core)
-    ys, xs = np.nonzero(core)
-    cx = float(xs.mean())
-    cy = float(ys.mean())
-    radius = float(np.max(np.hypot(xs - cx, ys - cy)))
-    if radius < 1:
-        raise ValueError("could not find a coin: detected region is too small")
+        for label, area in counts.items():
+            if area < 40 or area > mask.size * 0.8:
+                continue
+            ys, xs = np.nonzero(labels == label)
+            x0, x1 = int(xs.min()), int(xs.max())
+            y0, y1 = int(ys.min()), int(ys.max())
+            if x0 == 0 or y0 == 0 or x1 == small.width - 1 or y1 == small.height - 1:
+                continue
+            width, height = x1 - x0 + 1, y1 - y0 + 1
+            aspect = min(width, height) / max(width, height)
+            extent = area / (width * height)
+            # Allow oval/chipped flans, but exclude lines, rectangles and
+            # sparse fragments of lettering or paper texture.
+            if aspect < 0.6 or not 0.55 <= extent <= 0.9:
+                continue
+            cx, cy = float(xs.mean()), float(ys.mean())
+            radius = float(np.hypot(xs - cx, ys - cy).max())
+            compactness = area / (np.pi * radius * radius)
+            if compactness < 0.45:
+                continue
+            score = area * compactness * aspect
+            if score > best_score:
+                best_score = score
+                best = cx, cy, radius
 
-    # Re-threshold in a window around the dark core so the full flan is
-    # included (worn silver rims) without picking up distant paper shadows.
-    window = max(int(np.ceil(radius * 2.5)), 4)
-    x0 = max(int(cx - window), 0)
-    y0 = max(int(cy - window), 0)
-    x1 = min(int(cx + window) + 1, small.shape[1])
-    y1 = min(int(cy + window) + 1, small.shape[0])
-    local = small[y0:y1, x0:x1]
-    background = float(np.percentile(local, 90))
-    if background <= 0:
-        raise ValueError("image is too dark to separate a coin from the background")
-    local_mask = local < background * _LOCAL_DARKNESS
-    if np.any(local_mask):
-        local_mask = _component_containing(
-            local_mask, int(cy) - y0, int(cx) - x0
-        )
-        ys, xs = np.nonzero(local_mask)
-        cx = float(xs.mean()) + x0
-        cy = float(ys.mean()) + y0
-        radius = float(np.max(np.hypot(xs - (cx - x0), ys - (cy - y0))))
-
-    return cx * scale, cy * scale, radius * scale
-
-
-def _largest_component(mask: np.ndarray) -> np.ndarray:
-    labels, counts = _label(mask)
-    if not counts:
-        return mask
-    best = max(counts, key=lambda label: counts[label])
-    return labels == best
-
-
-def _component_containing(mask: np.ndarray, row: int, col: int) -> np.ndarray:
-    labels, _counts = _label(mask)
-    row = min(max(row, 0), mask.shape[0] - 1)
-    col = min(max(col, 0), mask.shape[1] - 1)
-    seed = int(labels[row, col])
-    if seed == 0:
-        return _largest_component(mask)
-    return labels == seed
+    if best is None:
+        raise ValueError("could not find a coin: no closed, roughly circular outline")
+    cx, cy, radius = best
+    sx, sy = image.width / small.width, image.height / small.height
+    # Map pixel centers, allowing half a detection pixel for the outer edge.
+    return (cx + 0.5) * sx - 0.5, (cy + 0.5) * sy - 0.5, (radius + 0.5) * max(sx, sy)
 
 
 def _label(mask: np.ndarray) -> tuple[np.ndarray, dict[int, int]]:

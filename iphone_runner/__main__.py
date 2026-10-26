@@ -7,7 +7,7 @@ A runner for series of images taken with an iphone:
 """
 import sys
 import os
-from src import concatenate
+from coinimg import concatenate
 
 
 def main(in_dir: str, out_dir: str) -> None:
