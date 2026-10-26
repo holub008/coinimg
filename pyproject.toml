@@ -1,0 +1,29 @@
+[project]
+name = "coinimg"
+version = "0.1.0"
+description = "Concatenate obverse and reverse coin photos into a single image"
+readme = "README.md"
+authors = [
+    { name = "Karl Holub", email = "karljholub@gmail.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "numpy>=2.5.4",
+    "pillow>=13.0.0",
+    "pillow-heif>=1.8.1",
+]
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["coinimg"]
+
+[tool.setuptools.package-dir]
+coinimg = "src"
+
+[dependency-groups]
+dev = [
+    "ty>=0.0.91",
+]
